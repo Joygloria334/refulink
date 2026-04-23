@@ -1,8 +1,1 @@
-django>=4.2
-psycopg2-binary
-requests
-python-dotenv
-djangorestframework
-djangorestframework-simplejwt
-django-cors-headers
-dj-database-url
+
