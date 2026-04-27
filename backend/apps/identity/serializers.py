@@ -19,15 +19,20 @@ class AlienCheckResponseSerializer(serializers.Serializer):
 
 
 class RegisterRefugeeIdentitySerializer(serializers.Serializer):
-    """Links an authenticated user's account to a Stellar public key."""
+    """
+    Optionally accepts an existing Stellar public key.
+    If omitted, the server generates a new keypair and returns the private key once.
+    """
     stellar_public_key = serializers.CharField(
         max_length=56,
         min_length=56,
-        help_text="Refugee's Stellar G... public key (56 chars)",
+        required=False,
+        allow_blank=True,
+        help_text="Optional: provide an existing Stellar G... public key. Omit to auto-generate.",
     )
 
     def validate_stellar_public_key(self, value):
-        if not value.startswith("G"):
+        if value and not value.startswith("G"):
             raise serializers.ValidationError("Stellar public key must start with 'G'.")
         return value
 

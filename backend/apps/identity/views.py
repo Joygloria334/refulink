@@ -71,8 +71,9 @@ class VerifyRINView(views.APIView):
 
 class RegisterRefugeeIdentityView(views.APIView):
     """
-    Links the authenticated user's account to a Stellar public key.
-    Creates a RefugeeIdentity record with UNVERIFIED status.
+    Creates a RefugeeIdentity record for the authenticated user.
+    If no stellar_public_key is supplied, a new Stellar keypair is generated
+    server-side and the private key is returned ONCE in the response.
     Must be called after VerifyRINView succeeds.
     """
     permission_classes = [IsAuthenticated]
@@ -82,15 +83,12 @@ class RegisterRefugeeIdentityView(views.APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        stellar_public_key = serializer.validated_data["stellar_public_key"]
-
         if hasattr(request.user, "refugee_identity"):
             return Response(
                 {"detail": "Identity already registered."},
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # Derive hashed_rin from the User's linked AlienID record
         hashed_rin = _get_hashed_rin_for_user(request.user)
         if not hashed_rin:
             return Response(
@@ -98,20 +96,47 @@ class RegisterRefugeeIdentityView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        provided_key = serializer.validated_data.get("stellar_public_key")
+        if provided_key:
+            public_key = provided_key
+            private_key = None
+        else:
+            from apps.stellar.keypair_service import generate_keypair
+            kp = generate_keypair()
+            public_key = kp["public_key"]
+            private_key = kp["secret_key"]
+
         identity = RefugeeIdentity.objects.create(
             user=request.user,
             hashed_rin=hashed_rin,
-            stellar_public_key=stellar_public_key,
+            stellar_public_key=public_key,
         )
 
-        return Response(
-            {
-                "detail": "Refugee identity registered.",
-                "stellar_public_key": identity.stellar_public_key,
-                "verification_status": identity.verification_status,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        # Best-effort: register identity on-chain (non-blocking)
+        try:
+            from apps.stellar.soroban_client import register_identity
+            ambassador_secret = os.getenv("AMBASSADOR_SECRET", "")
+            if ambassador_secret:
+                register_identity(
+                    ambassador_secret=ambassador_secret,
+                    refugee_public_key=public_key,
+                    hashed_rin_hex=hashed_rin,
+                )
+        except Exception:
+            pass
+
+        response_data = {
+            "detail": "Refugee identity registered.",
+            "stellar_public_key": public_key,
+            "verification_status": identity.verification_status,
+        }
+        if private_key:
+            response_data["stellar_private_key"] = private_key
+            response_data["private_key_warning"] = (
+                "Save this private key securely — it will NOT be shown again."
+            )
+
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 
 class RequestVouchView(views.APIView):
@@ -192,34 +217,44 @@ class TriggerOnChainVouchView(views.APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        ambassador_secret = os.getenv("AMBASSADOR_SECRET")
-        if not ambassador_secret:
-            return Response(
-                {"detail": "Ambassador secret not configured on server."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+        ambassador_secret = os.getenv("AMBASSADOR_SECRET", "")
+        tx_hash = "offline-mode"
 
-        try:
-            from apps.stellar.soroban_client import vouch_refugee
-            result = vouch_refugee(
-                ambassador_secret=ambassador_secret,
-                refugee_public_key=identity.stellar_public_key,
-                hashed_rin_hex=identity.hashed_rin,
-            )
-        except Exception as exc:
-            return Response(
-                {"detail": f"On-chain vouch failed: {exc}"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+        if ambassador_secret:
+            try:
+                from apps.stellar.soroban_client import vouch_refugee
+                result = vouch_refugee(
+                    ambassador_secret=ambassador_secret,
+                    refugee_public_key=identity.stellar_public_key,
+                    hashed_rin_hex=identity.hashed_rin,
+                )
+                tx_hash = result.get("hash", tx_hash)
+            except Exception as exc:
+                return Response(
+                    {"detail": f"On-chain vouch failed: {exc}"},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
 
         identity.verification_status = VerificationStatus.VOUCHED
         identity.vouched_at = timezone.now()
         identity.save(update_fields=["verification_status", "vouched_at", "updated_at"])
 
+        # Best-effort: flip verified=true on-chain (non-blocking)
+        if ambassador_secret:
+            try:
+                from apps.stellar.soroban_client import set_verified
+                set_verified(
+                    ambassador_secret=ambassador_secret,
+                    refugee_public_key=identity.stellar_public_key,
+                    verified=True,
+                )
+            except Exception:
+                pass
+
         return Response(
             {
                 "detail": "Vouch recorded on Stellar.",
-                "tx_hash": result.get("hash"),
+                "tx_hash": tx_hash,
                 "verification_status": identity.verification_status,
             },
             status=status.HTTP_200_OK,

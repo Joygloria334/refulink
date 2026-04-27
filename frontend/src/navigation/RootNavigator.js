@@ -4,6 +4,7 @@ import LandingScreen from "../screens/LandingScreen";
 import LoginScreen from "../screens/LoginScreen";
 import SignupScreen from "../screens/SignupScreen";
 import VerificationDashboard from "../screens/verification/VerificationDashboard";
+import WalletDashboard from "../screens/wallet/WalletDashboard";
 
 const Stack = createNativeStackNavigator();
 
@@ -25,6 +26,11 @@ export default function RootNavigator() {
         name="VerificationDashboard"
         component={VerificationDashboard}
         options={{ title: "My Verification" }}
+      />
+      <Stack.Screen
+        name="WalletDashboard"
+        component={WalletDashboard}
+        options={{ title: "Wallet" }}
       />
     </Stack.Navigator>
   );

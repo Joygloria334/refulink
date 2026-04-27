@@ -10,6 +10,7 @@ _CONTRACT_ID = os.getenv("ORBITAL_CONTRACT_ID", "")
 _NETWORK = Network.TESTNET_NETWORK_PASSPHRASE
 _POLL_INTERVAL = 2   # seconds between status polls
 _POLL_MAX = 20       # max attempts (~40 seconds)
+_ERR_NO_CONTRACT = "ORBITAL_CONTRACT_ID is not set"
 
 
 def _server() -> SorobanServer:
@@ -27,6 +28,106 @@ def _wait_for_transaction(server: SorobanServer, tx_hash: str) -> dict:
     raise TimeoutError(f"Soroban transaction timed out: {tx_hash}")
 
 
+def register_identity(
+    ambassador_secret: str,
+    refugee_public_key: str,
+    hashed_rin_hex: str,
+) -> dict:
+    """
+    Calls VouchContract.register_identity() on Stellar.
+    Stores hashed_rin on-chain and initialises verified=false for the refugee address.
+    Returns {"success": True, "hash": "<tx_hash>"} on success.
+    """
+    if not _CONTRACT_ID:
+        raise EnvironmentError(_ERR_NO_CONTRACT)
+
+    server = _server()
+    ambassador_kp = Keypair.from_secret(ambassador_secret)
+    source = server.load_account(ambassador_kp.public_key)
+
+    hashed_rin_bytes = bytes.fromhex(hashed_rin_hex)
+    if len(hashed_rin_bytes) != 32:
+        raise ValueError("hashed_rin_hex must be a 64-char hex string (SHA-256)")
+
+    params = [
+        scval.to_address(Address(ambassador_kp.public_key)),
+        scval.to_address(Address(refugee_public_key)),
+        scval.to_bytes(hashed_rin_bytes),
+    ]
+
+    tx = (
+        TransactionBuilder(
+            source_account=source,
+            network_passphrase=_NETWORK,
+            base_fee=100,
+        )
+        .set_timeout(30)
+        .append_invoke_contract_function_op(
+            contract_id=_CONTRACT_ID,
+            function_name="register_identity",
+            parameters=params,
+        )
+        .build()
+    )
+
+    simulation = server.simulate_transaction(tx)
+    if hasattr(simulation, "error") and simulation.error:
+        raise RuntimeError(f"Simulation error: {simulation.error}")
+
+    prepared = server.prepare_transaction(tx, simulation)
+    prepared.sign(ambassador_kp)
+    response = server.send_transaction(prepared)
+    return _wait_for_transaction(server, response.hash)
+
+
+def set_verified(
+    ambassador_secret: str,
+    refugee_public_key: str,
+    verified: bool,
+) -> dict:
+    """
+    Calls VouchContract.set_verified() on Stellar.
+    Flips the on-chain verified flag for the refugee address.
+    Returns {"success": True, "hash": "<tx_hash>"} on success.
+    """
+    if not _CONTRACT_ID:
+        raise EnvironmentError(_ERR_NO_CONTRACT)
+
+    server = _server()
+    ambassador_kp = Keypair.from_secret(ambassador_secret)
+    source = server.load_account(ambassador_kp.public_key)
+
+    params = [
+        scval.to_address(Address(ambassador_kp.public_key)),
+        scval.to_address(Address(refugee_public_key)),
+        scval.to_bool(verified),
+    ]
+
+    tx = (
+        TransactionBuilder(
+            source_account=source,
+            network_passphrase=_NETWORK,
+            base_fee=100,
+        )
+        .set_timeout(30)
+        .append_invoke_contract_function_op(
+            contract_id=_CONTRACT_ID,
+            function_name="set_verified",
+            parameters=params,
+        )
+        .build()
+    )
+
+    simulation = server.simulate_transaction(tx)
+    if hasattr(simulation, "error") and simulation.error:
+        raise RuntimeError(f"Simulation error: {simulation.error}")
+
+    prepared = server.prepare_transaction(tx, simulation)
+    prepared.sign(ambassador_kp)
+    response = server.send_transaction(prepared)
+    return _wait_for_transaction(server, response.hash)
+
+
 def vouch_refugee(
     ambassador_secret: str,
     refugee_public_key: str,
@@ -39,7 +140,7 @@ def vouch_refugee(
     Returns {"success": True, "hash": "<tx_hash>"} on success.
     """
     if not _CONTRACT_ID:
-        raise EnvironmentError("ORBITAL_CONTRACT_ID is not set")
+        raise EnvironmentError(_ERR_NO_CONTRACT)
 
     server = _server()
     ambassador_kp = Keypair.from_secret(ambassador_secret)
